@@ -3,6 +3,7 @@
 pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
 /*
 * @title RebaseToken
@@ -11,17 +12,23 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 * @notice the interest rate in the Smart contract can only decrease
 * @notice each user will have their interest rate that is the global interest rate at the time of deposit
 */
-contract RebaseToken is ERC20 {
+contract RebaseToken is ERC20, AccessControl {
     error RebaseToken_InterestRateOnlyCanDecrease(uint256 _oldInterestRate, uint256 _newInterestRate);
+
+    bytes32 private constant MINT_AND_BURN_ROLE = keccak256("MINT_AND_BURN_ROLE");
     
     uint256 private constant PRECISION_FACTOR = 1e18;
-    uint256 private s_interestRate = 5e10;
+    uint256 private s_interestRate = (5 * PRECISION_FACTOR) / 1e8; // 10^-8 == 1/ 10^8
     mapping(address => uint256) private s_userInterestRate;
     mapping(address => uint256) private s_userLastUpdatedTimestamp;
 
     event InterestRateSet(uint256 _newInterestRate);
     constructor() ERC20("Rebase Token", "RBT") {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+    }
 
+    function grantMintAndBurnRole(address _account) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _grantRole(MINT_AND_BURN_ROLE, _account);
     }
 
 
@@ -45,33 +52,53 @@ contract RebaseToken is ERC20 {
     * @dev The interest rate can only decrease
     */
 
-    function setInterestRate(uint256 _newInterestRate) external {
+    function setInterestRate(uint256 _newInterestRate) external onlyRole(DEFAULT_ADMIN_ROLE) {
         //Set interest rate
-        if (_newInterestRate < s_interestRate){
+        if (_newInterestRate >= s_interestRate) {
             revert RebaseToken_InterestRateOnlyCanDecrease(s_interestRate, _newInterestRate);
         }
         s_interestRate = _newInterestRate;
         emit InterestRateSet(_newInterestRate);
-
     }
-    // deberia ser:
-    /*if (_newInterestRate >= s_interestRate) {
-    revert RebaseToken_InterestRateOnlyCanDecrease(
-        s_interestRate,
-        _newInterestRate
-    );
-    }
-    */
 
     /*
     * @notice Mint the user tokens when they deposit into the vault
     * @param _to The user to mint the tokens to
     * @param _amount The amount of tokens to mint
     */
-    function mint(address _to, uint256 amount) external {
+    function mint(address _to, uint256 amount) external onlyRole(MINT_AND_BURN_ROLE) {
         _mintAccruedInterest(_to);
         s_userInterestRate[_to] = s_interestRate;
         _mint(_to, amount);
+    }
+
+    function burn(address _from, uint256 amount) external onlyRole(MINT_AND_BURN_ROLE) {
+        _mintAccruedInterest(_from);
+        _burn(_from, amount);
+    }
+
+    function transfer(address _recipient, uint256 _amount) public override returns (bool) {
+        _mintAccruedInterest(msg.sender);
+        _mintAccruedInterest(_recipient);
+        if (_amount == type(uint256).max) {
+            _amount = balanceOf(msg.sender);
+        }
+        if (balanceOf(_recipient) == 0) {
+            s_userInterestRate[_recipient] = s_userInterestRate[msg.sender];
+        }
+        return super.transfer(_recipient, _amount);
+    }
+
+    function transferFrom(address _sender, address _recipient, uint256 _amount) public override returns (bool) {
+        _mintAccruedInterest(_sender);
+        _mintAccruedInterest(_recipient);
+        if (_amount == type(uint256).max) {
+            _amount = balanceOf(_sender);
+        }
+        if (balanceOf(_recipient) == 0) {
+            s_userInterestRate[_recipient] = s_userInterestRate[_sender];
+        }
+        return super.transferFrom(_sender, _recipient, _amount);
     }
 
     /*
@@ -87,6 +114,10 @@ contract RebaseToken is ERC20 {
         return super.balanceOf(_user) * calculateUserAccumulatedInterestSinceLastUpdate(_user)/PRECISION_FACTOR;
     }
 
+    function principleBalanceOf(address _user) external view returns (uint256) {
+        return super.balanceOf(_user);
+    }
+
     /*
     * @notice Calculate the interest that has accumulated since the last update
     * @param _user The user to calculate the interest accumulated for
@@ -99,7 +130,7 @@ contract RebaseToken is ERC20 {
         // calculate the number of tokens that need to be minted to the user -> (2) - (1)
         // call _mint to mint the tokens to the user
         // set the users last updated timestamp to now
-        s_userLastUpdatedTimestamp[_user] = block.timestamp;
+        s_userLastUpdatedTimestamp[_to] = block.timestamp;
         // s_userLastUpdatedTimestamp[_to] = block.timestamp;
     }
 
@@ -111,6 +142,10 @@ contract RebaseToken is ERC20 {
 
     function getUserInterestRate(address _user) external view returns (uint256) {
         return s_userInterestRate[_user];
+    }
+
+    function getInterestRate() external view returns (uint256) {
+        return s_interestRate;
     }
 }
 
